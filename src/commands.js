@@ -9,6 +9,7 @@ const { resolve, search, formatDuration, parseTime } = require('./youtube');
 const { LOOP_MODES, getPlayer, getOrCreatePlayer } = require('./player');
 const playlists = require('./playlists');
 const settings = require('./settings');
+const sessions = require('./sessions');
 
 const QUEUE_PAGE_SIZE = 10;
 
@@ -31,9 +32,9 @@ const definitions = [
     .setDescription('Search YouTube and pick which result to queue')
     .addStringOption((opt) => opt.setName('query').setDescription('Search terms').setRequired(true)),
   new SlashCommandBuilder().setName('skip').setDescription('Skip the current song'),
-  new SlashCommandBuilder().setName('stop').setDescription('Stop playback, clear the queue and leave'),
+  new SlashCommandBuilder().setName('stop').setDescription('Stop and leave. The queue is saved for /resume'),
   new SlashCommandBuilder().setName('pause').setDescription('Pause playback'),
-  new SlashCommandBuilder().setName('resume').setDescription('Resume playback'),
+  new SlashCommandBuilder().setName('resume').setDescription('Resume playback, or continue the queue saved by /stop'),
   new SlashCommandBuilder().setName('nowplaying').setDescription('Show the current song and its progress'),
   new SlashCommandBuilder()
     .setName('queue')
@@ -46,7 +47,9 @@ const definitions = [
     .addIntegerOption((opt) =>
       opt.setName('position').setDescription('Position in /queue').setRequired(true).setMinValue(1),
     ),
-  new SlashCommandBuilder().setName('clear').setDescription('Clear the queue but keep the current song playing'),
+  new SlashCommandBuilder()
+    .setName('clear')
+    .setDescription('Clear the queue, including one saved by /stop (the current song keeps playing)'),
   new SlashCommandBuilder()
     .setName('loop')
     .setDescription('Repeat the current song or the whole queue')
@@ -190,6 +193,28 @@ async function queueTracks(interaction, voiceChannel, tracks, { playlistTitle = 
   return interaction.editReply({ content, components: [] });
 }
 
+const stopMessage = (text, saved) =>
+  saved ? `${text} Saved ${saved} songs: \`/resume\` continues, \`/clear\` discards them.` : text;
+
+/** Rejoin with the queue saved by /stop. */
+async function resumeStopped(interaction, session) {
+  const { channel, error } = joinableChannel(interaction);
+  if (error) return replyPrivately(interaction, error);
+  if (!isDJ(interaction)) return replyNotDJ(interaction);
+
+  await interaction.deferReply();
+  const player = getOrCreatePlayer(channel, interaction.channel);
+  try {
+    await player.restore(session);
+  } catch (err) {
+    console.error('Failed to resume:', err.message);
+    player.destroy();
+    return interaction.editReply('Could not join the voice channel.');
+  }
+  sessions.clearStopped(interaction.guildId);
+  return interaction.editReply(`▶️ Resumed the saved queue (${1 + session.queue.length} songs)`);
+}
+
 async function playQuery(interaction, { next }) {
   const { channel, error } = joinableChannel(interaction);
   if (error) return replyPrivately(interaction, error);
@@ -313,8 +338,8 @@ const commandHandlers = {
   async stop(interaction) {
     const player = controllablePlayer(interaction, { needsTrack: false });
     if (!player) return;
-    player.destroy();
-    return interaction.reply('⏹️ Stopped and left the channel.');
+    const saved = player.destroy({ saveQueue: true });
+    return interaction.reply(stopMessage('⏹️ Stopped and left the channel.', saved));
   },
 
   async pause(interaction) {
@@ -326,6 +351,11 @@ const commandHandlers = {
   },
 
   async resume(interaction) {
+    if (!getPlayer(interaction.guildId)?.current) {
+      const saved = sessions.getStopped(interaction.guildId);
+      if (!saved) return replyPrivately(interaction, 'Nothing to resume.');
+      return resumeStopped(interaction, saved);
+    }
     const player = controllablePlayer(interaction);
     if (!player) return;
     if (!player.resume()) return replyPrivately(interaction, 'Not paused.');
@@ -380,10 +410,20 @@ const commandHandlers = {
   },
 
   async clear(interaction) {
+    if (!getPlayer(interaction.guildId)?.current) {
+      const saved = sessions.getStopped(interaction.guildId);
+      if (!saved) return replyPrivately(interaction, 'The queue is already empty.');
+      if (!isDJ(interaction)) return replyNotDJ(interaction);
+      sessions.clearStopped(interaction.guildId);
+      return interaction.reply(`🧹 Discarded the saved queue (${1 + saved.queue.length} songs)`);
+    }
     const player = controllablePlayer(interaction);
     if (!player) return;
     const count = player.clear();
-    return interaction.reply(`🧹 Cleared ${count} songs from the queue`);
+    const discarded = sessions.clearStopped(interaction.guildId);
+    return interaction.reply(
+      `🧹 Cleared ${count} song${count === 1 ? '' : 's'} from the queue${discarded ? ' and discarded the queue saved by `/stop`' : ''}`,
+    );
   },
 
   async loop(interaction) {
@@ -492,8 +532,7 @@ async function handleButton(interaction) {
     }
     case 'stop':
       await interaction.deferUpdate();
-      player.destroy();
-      return interaction.followUp(`⏹️ **${name}** stopped playback.`);
+      return interaction.followUp(stopMessage(`⏹️ **${name}** stopped playback.`, player.destroy({ saveQueue: true })));
     case 'shuffle':
       if (player.queue.length < 2) return replyPrivately(interaction, 'Need at least 2 songs in the queue to shuffle.');
       player.shuffle();

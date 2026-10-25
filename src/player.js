@@ -87,7 +87,7 @@ class GuildPlayer {
           entersState(this.connection, VoiceConnectionStatus.Connecting, 5_000),
         ]);
       } catch {
-        this.destroy();
+        this.destroy({ saveQueue: true });
       }
     });
   }
@@ -373,14 +373,15 @@ class GuildPlayer {
     }
     if (this.leaveTimer) return;
     this.leaveTimer = setTimeout(() => {
-      this.textChannel.send('👋 Left the voice channel due to inactivity.').catch(() => {});
-      this.destroy();
+      const saved = this.destroy({ saveQueue: true });
+      const hint = saved ? ' Your queue is saved: use `/resume` to continue or `/clear` to discard it.' : '';
+      this.textChannel.send(`👋 Left the voice channel due to inactivity.${hint}`).catch(() => {});
     }, IDLE_TIMEOUT_MS);
   }
 
   toSession() {
     return {
-      voiceChannelId: this.voiceChannel.id,
+      voiceChannelId: this.voiceChannel?.id ?? null,
       textChannelId: this.textChannel.id,
       nowPlayingMessageId: this.nowPlayingMessage?.id ?? null,
       current: storableTrack(this.current),
@@ -392,8 +393,8 @@ class GuildPlayer {
     };
   }
 
-  /** Pick up a session saved before a restart. */
-  async restore(session) {
+  /** Pick up a saved session (from a restart or /stop). `announce` is posted before playback starts. */
+  async restore(session, { announce = null } = {}) {
     this.queue = session.queue;
     this.loop = session.loop;
     this.volume = session.volume;
@@ -408,12 +409,21 @@ class GuildPlayer {
     if (!nearEnd || !this.queue.length) this.queue.unshift(current);
 
     await entersState(this.connection, VoiceConnectionStatus.Ready, 20_000);
-    await this.textChannel.send('🔄 I restarted, picking up where we left off.').catch(() => {});
+    if (announce) await this.textChannel.send(announce).catch(() => {});
     this.playNext({ offset: canSeek && !nearEnd ? position : null });
   }
 
-  destroy() {
-    if (this.destroyed) return;
+  /**
+   * Leave the channel. With `saveQueue`, whatever was playing is kept for /resume.
+   * Returns the number of songs saved (0 if nothing was).
+   */
+  destroy({ saveQueue = false } = {}) {
+    if (this.destroyed) return 0;
+    let saved = 0;
+    if (saveQueue && this.current) {
+      sessions.saveStopped(this.guild.id, this.toSession());
+      saved = 1 + this.queue.length;
+    }
     this.destroyed = true;
     clearTimeout(this.leaveTimer);
     clearInterval(this.segmentTimer);
@@ -427,6 +437,7 @@ class GuildPlayer {
     }
     players.delete(this.guild.id);
     persistSessions();
+    return saved;
   }
 }
 
@@ -470,7 +481,9 @@ async function restoreSessions(client) {
       const textChannel = await client.channels.fetch(session.textChannelId);
       if (!voiceChannel?.isVoiceBased() || !textChannel?.isTextBased()) continue;
       if (!voiceChannel.members.some((m) => !m.user.bot)) continue;
-      await getOrCreatePlayer(voiceChannel, textChannel).restore(session);
+      await getOrCreatePlayer(voiceChannel, textChannel).restore(session, {
+        announce: '🔄 I restarted, picking up where we left off.',
+      });
       console.log(`Resumed playback in ${voiceChannel.guild.name}`);
     } catch (err) {
       console.error(`Could not resume in guild ${guildId}:`, err.message);
