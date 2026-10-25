@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } = require('discord.js');
 const { definitions, handleCommand, handleButton, handleSelect, handleAutocomplete } = require('./commands');
-const { getPlayer } = require('./player');
+const { getPlayer, restoreSessions, shutdownPlayers } = require('./player');
 
 const { DISCORD_TOKEN, GUILD_ID } = process.env;
 if (!DISCORD_TOKEN) {
@@ -23,7 +23,18 @@ client.once(Events.ClientReady, async (c) => {
     : Routes.applicationCommands(c.user.id);
   await rest.put(route, { body: definitions });
   console.log(`Registered ${definitions.length} slash commands ${GUILD_ID ? `in guild ${GUILD_ID}` : 'globally'}`);
+
+  await restoreSessions(c);
 });
+
+// Save what's playing on shutdown so the next start resumes it.
+function shutdown() {
+  console.log('Shutting down, saving sessions…');
+  shutdownPlayers();
+  process.exit(0);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.inGuild()) return;

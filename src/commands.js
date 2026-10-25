@@ -8,6 +8,7 @@ const {
 const { resolve, search, formatDuration, parseTime } = require('./youtube');
 const { LOOP_MODES, getPlayer, getOrCreatePlayer } = require('./player');
 const playlists = require('./playlists');
+const settings = require('./settings');
 
 const QUEUE_PAGE_SIZE = 10;
 
@@ -80,6 +81,26 @@ const definitions = [
     .addSubcommand((sub) =>
       sub.setName('delete').setDescription('Delete a saved playlist').addStringOption(playlistNameOption),
     ),
+  new SlashCommandBuilder()
+    .setName('autoplay')
+    .setDescription('Keep playing related songs when the queue runs out')
+    .addBooleanOption((opt) => opt.setName('enabled').setDescription('On or off').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('sponsorblock')
+    .setDescription('Skip non-music sections, sponsors and subscribe reminders (via SponsorBlock)')
+    .addBooleanOption((opt) => opt.setName('enabled').setDescription('On or off').setRequired(true)),
+  new SlashCommandBuilder()
+    .setName('dj')
+    .setDescription('Limit playback controls to a DJ role')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((sub) =>
+      sub
+        .setName('set')
+        .setDescription('Only members with this role can control playback')
+        .addRoleOption((opt) => opt.setName('role').setDescription('The DJ role').setRequired(true)),
+    )
+    .addSubcommand((sub) => sub.setName('clear').setDescription('Let everyone control playback again')),
+  new SlashCommandBuilder().setName('settings').setDescription("Show this server's music settings"),
 ].map((cmd) => cmd.toJSON());
 
 function replyPrivately(interaction, content) {
@@ -99,8 +120,31 @@ function joinableChannel(interaction) {
   return { channel };
 }
 
+/**
+ * Whether the user may use DJ controls: always when no DJ role is set; otherwise if they
+ * have the role, have Manage Server, or are the only one listening.
+ */
+function isDJ(interaction) {
+  const { djRoleId } = settings.get(interaction.guildId);
+  if (!djRoleId) return true;
+  if (interaction.memberPermissions.has(PermissionFlagsBits.ManageGuild)) return true;
+  if (interaction.member.roles.cache.has(djRoleId)) return true;
+  const channel = getPlayer(interaction.guildId)?.voiceChannel;
+  return (
+    channel?.id === interaction.member.voice.channelId && channel.members.filter((m) => !m.user.bot).size === 1
+  );
+}
+
+function replyNotDJ(interaction) {
+  const { djRoleId } = settings.get(interaction.guildId);
+  return replyPrivately(interaction, `Only members with the <@&${djRoleId}> role can do that.`);
+}
+
+/** Songs you requested (and autoplay picks) can be skipped or removed without being a DJ. */
+const canSkip = (interaction, track) => !track.requesterId || track.requesterId === interaction.user.id;
+
 /** The guild's player if the user may control it; otherwise replies with why not and returns null. */
-function controllablePlayer(interaction, { needsTrack = true } = {}) {
+function controllablePlayer(interaction, { needsTrack = true, dj = true } = {}) {
   const player = getPlayer(interaction.guildId);
   if (!player || (needsTrack && !player.current)) {
     replyPrivately(interaction, 'Nothing is playing.');
@@ -110,12 +154,19 @@ function controllablePlayer(interaction, { needsTrack = true } = {}) {
     replyPrivately(interaction, 'Join my voice channel to control playback.');
     return null;
   }
+  if (dj && !isDJ(interaction)) {
+    replyNotDJ(interaction);
+    return null;
+  }
   return player;
 }
 
 /** Enqueue tracks and report back. The interaction must already be deferred. */
 async function queueTracks(interaction, voiceChannel, tracks, { playlistTitle = null, next = false } = {}) {
-  for (const track of tracks) track.requestedBy = interaction.user.toString();
+  for (const track of tracks) {
+    track.requestedBy = interaction.user.toString();
+    track.requesterId = interaction.user.id;
+  }
 
   const player = getOrCreatePlayer(voiceChannel, interaction.channel);
   let queued;
@@ -142,6 +193,7 @@ async function queueTracks(interaction, voiceChannel, tracks, { playlistTitle = 
 async function playQuery(interaction, { next }) {
   const { channel, error } = joinableChannel(interaction);
   if (error) return replyPrivately(interaction, error);
+  if (next && !isDJ(interaction)) return replyNotDJ(interaction);
 
   await interaction.deferReply();
   const query = interaction.options.getString('query', true);
@@ -250,7 +302,8 @@ const commandHandlers = {
   },
 
   async skip(interaction) {
-    const player = controllablePlayer(interaction);
+    const current = getPlayer(interaction.guildId)?.current;
+    const player = controllablePlayer(interaction, { dj: !current || !canSkip(interaction, current) });
     if (!player) return;
     const title = player.current.title;
     player.skip();
@@ -315,12 +368,13 @@ const commandHandlers = {
   },
 
   async remove(interaction) {
-    const player = controllablePlayer(interaction);
+    const player = controllablePlayer(interaction, { dj: false });
     if (!player) return;
     const position = interaction.options.getInteger('position', true);
     if (position > player.queue.length) {
       return replyPrivately(interaction, `The queue only has ${player.queue.length} songs.`);
     }
+    if (!canSkip(interaction, player.queue[position - 1]) && !isDJ(interaction)) return replyNotDJ(interaction);
     const removed = player.remove(position - 1);
     return interaction.reply(`🗑️ Removed **${removed.title}**`);
   },
@@ -369,7 +423,44 @@ const commandHandlers = {
   },
 
   playlist: (interaction) => playlistHandlers[interaction.options.getSubcommand()](interaction),
+
+  autoplay: (interaction) => toggleSetting(interaction, 'autoplay', '📻 Autoplay'),
+  sponsorblock: (interaction) => toggleSetting(interaction, 'sponsorblock', '⏩ SponsorBlock'),
+
+  async dj(interaction) {
+    if (interaction.options.getSubcommand() === 'clear') {
+      settings.set(interaction.guildId, { djRoleId: null });
+      return interaction.reply('🎧 DJ role cleared. Everyone can control playback.');
+    }
+    const role = interaction.options.getRole('role', true);
+    settings.set(interaction.guildId, { djRoleId: role.id });
+    return interaction.reply({
+      content: `🎧 Only members with ${role} (or Manage Server) can now control playback. Anyone can still queue songs and skip their own.`,
+      allowedMentions: { parse: [] },
+    });
+  },
+
+  async settings(interaction) {
+    const { autoplay, sponsorblock, djRoleId } = settings.get(interaction.guildId);
+    const onOff = (value) => (value ? 'on' : 'off');
+    return replyPrivately(
+      interaction,
+      [
+        `📻 Autoplay: **${onOff(autoplay)}**`,
+        `⏩ SponsorBlock: **${onOff(sponsorblock)}**`,
+        `🎧 DJ role: ${djRoleId ? `<@&${djRoleId}>` : '**none** (everyone can control playback)'}`,
+      ].join('\n'),
+    );
+  },
 };
+
+function toggleSetting(interaction, key, label) {
+  if (!isDJ(interaction)) return replyNotDJ(interaction);
+  const enabled = interaction.options.getBoolean('enabled', true);
+  settings.set(interaction.guildId, { [key]: enabled });
+  getPlayer(interaction.guildId)?.onSettingsChanged();
+  return interaction.reply(`${label} ${enabled ? 'on' : 'off'}`);
+}
 
 async function handleCommand(interaction) {
   const handler = commandHandlers[interaction.commandName];
@@ -379,7 +470,9 @@ async function handleCommand(interaction) {
 /** Buttons on the now-playing message. */
 async function handleButton(interaction) {
   const action = interaction.customId.split(':')[1];
-  const player = controllablePlayer(interaction, { needsTrack: action !== 'stop' });
+  const current = getPlayer(interaction.guildId)?.current;
+  const ownSkip = action === 'skip' && current && canSkip(interaction, current);
+  const player = controllablePlayer(interaction, { needsTrack: action !== 'stop', dj: !ownSkip });
   if (!player) return;
   const name = interaction.member.displayName;
 

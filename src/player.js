@@ -9,10 +9,16 @@ const {
   entersState,
   joinVoiceChannel,
 } = require('@discordjs/voice');
-const { createAudioStream, formatDuration, thumbnailFor } = require('./youtube');
+const { createAudioStream, relatedTracks, formatDuration, thumbnailFor, videoIdOf } = require('./youtube');
+const sponsorblock = require('./sponsorblock');
+const settings = require('./settings');
+const sessions = require('./sessions');
 
 const IDLE_TIMEOUT_MS = 3 * 60_000;
+const SESSION_SAVE_INTERVAL_MS = 5_000;
 const LOOP_MODES = ['off', 'song', 'queue'];
+const HISTORY_SIZE = 100;
+const MAX_AUTOPLAY_SECONDS = 10 * 60; // prefer songs over hour-long mixes
 
 /** One player (connection + queue) per guild. */
 const players = new Map();
@@ -23,6 +29,14 @@ function progressBar(position, duration) {
   const filled = Math.min(size - 1, Math.round((position / duration) * (size - 1)));
   return `${'▬'.repeat(filled)}🔘${'▬'.repeat(size - 1 - filled)}\n${formatDuration(position)} / ${formatDuration(duration)}`;
 }
+
+const storableTrack = ({ title, url, duration, requestedBy, requesterId }) => ({
+  title,
+  url,
+  duration,
+  requestedBy,
+  requesterId,
+});
 
 class GuildPlayer {
   constructor(voiceChannel, textChannel) {
@@ -36,9 +50,13 @@ class GuildPlayer {
     this.loop = 'off';
     this.volume = 100;
     this.skipCurrent = false; // true when the current track must not be repeated by loop
+    this.segments = []; // SponsorBlock segments of the current track
+    this.history = []; // recently played video IDs, so autoplay doesn't repeat them
+    this.autoplayPrefetch = null; // { seedId, promise } of related tracks
     this.nowPlayingMessage = null;
     this.leaveTimer = null;
     this.destroyed = false;
+    this.segmentTimer = setInterval(() => this.checkSegments(), 500);
 
     this.connection = joinVoiceChannel({
       channelId: voiceChannel.id,
@@ -52,7 +70,9 @@ class GuildPlayer {
     });
     this.connection.subscribe(this.audioPlayer);
 
-    this.audioPlayer.on(AudioPlayerStatus.Idle, () => this.onTrackEnd());
+    this.audioPlayer.on(AudioPlayerStatus.Idle, () => {
+      this.onTrackEnd().catch((err) => console.error('Failed to start next track:', err));
+    });
     this.audioPlayer.on('error', (err) => {
       console.error('Audio player error:', err.message);
       this.skipCurrent = true;
@@ -70,6 +90,10 @@ class GuildPlayer {
         this.destroy();
       }
     });
+  }
+
+  get settings() {
+    return settings.get(this.guild.id);
   }
 
   get voiceChannel() {
@@ -91,6 +115,7 @@ class GuildPlayer {
     else this.queue.push(...tracks);
     if (this.current) {
       this.checkIdle();
+      this.prefetch();
       return true;
     }
     await entersState(this.connection, VoiceConnectionStatus.Ready, 20_000);
@@ -98,21 +123,29 @@ class GuildPlayer {
     return false;
   }
 
-  onTrackEnd() {
+  async onTrackEnd() {
     if (this.destroyed) return;
     const finished = this.current;
     if (finished) {
       if (this.loop === 'song' && !this.skipCurrent) this.queue.unshift(finished);
       else if (this.loop === 'queue') this.queue.push(finished);
     }
+    if (finished && !this.queue.length && this.settings.autoplay) {
+      const related = await this.nextAutoplayTrack(finished);
+      if (this.destroyed) return;
+      // Something may have been queued while we were looking.
+      if (related && !this.queue.length) this.queue.push(related);
+    }
     this.playNext();
   }
 
-  playNext() {
+  /** Play the next queued track. `offset` overrides where it starts (used when resuming). */
+  playNext({ offset = null } = {}) {
     const previous = this.current;
     const track = this.queue.shift();
     this.current = track ?? null;
     this.skipCurrent = false;
+    this.segments = [];
     this.checkIdle();
 
     if (!track) {
@@ -120,7 +153,11 @@ class GuildPlayer {
       this.clearControls();
       return;
     }
-    this.startStream(0);
+
+    this.remember(videoIdOf(track.url));
+    this.startStream(offset ?? this.introSkip(track));
+    this.loadSegments(track);
+    this.prefetch();
 
     // A looping track keeps its existing message instead of posting a new one each time.
     if (track === previous && this.nowPlayingMessage) return;
@@ -148,6 +185,80 @@ class GuildPlayer {
     this.audio = null;
     this.resource = null;
   }
+
+  remember(videoId) {
+    if (!videoId) return;
+    this.history.push(videoId);
+    if (this.history.length > HISTORY_SIZE) this.history.shift();
+  }
+
+  /** Warm caches for what plays next, so transitions don't wait on lookups. */
+  prefetch() {
+    const { sponsorblock: skipSegments, autoplay } = this.settings;
+    if (skipSegments && this.queue[0]) sponsorblock.getSegments(videoIdOf(this.queue[0].url));
+    if (autoplay && this.current && !this.queue.length) this.autoplayCandidates(this.current);
+  }
+
+  /** Call after the guild's settings change. */
+  onSettingsChanged() {
+    if (this.current) this.loadSegments(this.current);
+    this.prefetch();
+    this.refreshNowPlaying();
+  }
+
+  // --- SponsorBlock ---
+
+  /** Where to start a track so a non-music intro is skipped, if its segments are already known. */
+  introSkip(track) {
+    if (!this.settings.sponsorblock) return 0;
+    const intro = sponsorblock.peekSegments(videoIdOf(track.url))?.find((s) => s.start < 1);
+    return intro && !this.endsTrack(intro, track) ? intro.end : 0;
+  }
+
+  endsTrack(segment, track) {
+    return track.duration != null && segment.end >= track.duration - 1;
+  }
+
+  loadSegments(track) {
+    if (!this.settings.sponsorblock) return;
+    sponsorblock.getSegments(videoIdOf(track.url)).then((segments) => {
+      if (this.current === track) this.segments = segments;
+    });
+  }
+
+  checkSegments() {
+    if (!this.segments.length || this.audioPlayer.state.status !== AudioPlayerStatus.Playing) return;
+    if (!this.settings.sponsorblock) return;
+    const position = this.position;
+    const segment = this.segments.find((s) => position >= s.start && position < s.end - 1);
+    if (!segment) return;
+    // A segment running to the end means the song is over; treat it like a natural end (loops still apply).
+    if (this.endsTrack(segment, this.current)) this.audioPlayer.stop(true);
+    else this.seek(segment.end);
+  }
+
+  // --- Autoplay ---
+
+  autoplayCandidates(seed) {
+    const seedId = videoIdOf(seed.url);
+    if (this.autoplayPrefetch?.seedId !== seedId) {
+      const promise = relatedTracks(seedId).catch((err) => {
+        console.error('Autoplay lookup failed:', err.message);
+        if (this.autoplayPrefetch?.promise === promise) this.autoplayPrefetch = null;
+        return [];
+      });
+      this.autoplayPrefetch = { seedId, promise };
+    }
+    return this.autoplayPrefetch.promise;
+  }
+
+  async nextAutoplayTrack(seed) {
+    const candidates = (await this.autoplayCandidates(seed)).filter((t) => !this.history.includes(videoIdOf(t.url)));
+    const pick = candidates.find((t) => t.duration != null && t.duration <= MAX_AUTOPLAY_SECONDS) ?? candidates[0];
+    return pick && { ...pick, requestedBy: '📻 Autoplay', requesterId: null };
+  }
+
+  // --- Controls ---
 
   skip() {
     this.skipCurrent = true;
@@ -198,9 +309,12 @@ class GuildPlayer {
     return count;
   }
 
+  // --- Now-playing message ---
+
   nowPlayingEmbed({ progress = false } = {}) {
     const track = this.current;
     const footer = [`Loop: ${this.loop}`, `Volume: ${this.volume}%`];
+    if (this.settings.autoplay) footer.push('Autoplay on');
     if (this.paused) footer.push('Paused');
     return new EmbedBuilder()
       .setColor(0xff0000)
@@ -246,6 +360,8 @@ class GuildPlayer {
     this.nowPlayingMessage = null;
   }
 
+  // --- Lifecycle ---
+
   /** Leave after a while if nothing is playing or nobody is listening. */
   checkIdle() {
     if (this.destroyed) return;
@@ -262,10 +378,45 @@ class GuildPlayer {
     }, IDLE_TIMEOUT_MS);
   }
 
+  toSession() {
+    return {
+      voiceChannelId: this.voiceChannel.id,
+      textChannelId: this.textChannel.id,
+      nowPlayingMessageId: this.nowPlayingMessage?.id ?? null,
+      current: storableTrack(this.current),
+      position: Math.floor(this.position),
+      queue: this.queue.map(storableTrack),
+      loop: this.loop,
+      volume: this.volume,
+      history: this.history.slice(-50),
+    };
+  }
+
+  /** Pick up a session saved before a restart. */
+  async restore(session) {
+    this.queue = session.queue;
+    this.loop = session.loop;
+    this.volume = session.volume;
+    this.history = session.history ?? [];
+    if (session.nowPlayingMessageId) {
+      this.textChannel.messages.edit(session.nowPlayingMessageId, { components: [] }).catch(() => {});
+    }
+
+    const { current, position } = session;
+    const canSeek = current.duration != null && position >= 1;
+    const nearEnd = canSeek && position >= current.duration - 5;
+    if (!nearEnd || !this.queue.length) this.queue.unshift(current);
+
+    await entersState(this.connection, VoiceConnectionStatus.Ready, 20_000);
+    await this.textChannel.send('🔄 I restarted, picking up where we left off.').catch(() => {});
+    this.playNext({ offset: canSeek && !nearEnd ? position : null });
+  }
+
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
     clearTimeout(this.leaveTimer);
+    clearInterval(this.segmentTimer);
     this.queue = [];
     this.current = null;
     this.stopStream();
@@ -275,6 +426,7 @@ class GuildPlayer {
       this.connection.destroy();
     }
     players.delete(this.guild.id);
+    persistSessions();
   }
 }
 
@@ -292,4 +444,51 @@ function getOrCreatePlayer(voiceChannel, textChannel) {
   return player;
 }
 
-module.exports = { LOOP_MODES, getPlayer, getOrCreatePlayer };
+// --- Resume after restart ---
+
+// Off until saved sessions are restored, so the first save can't wipe them.
+let trackingSessions = false;
+
+function persistSessions() {
+  if (!trackingSessions) return;
+  const data = {};
+  for (const [guildId, player] of players) {
+    if (player.current && player.voiceChannel) data[guildId] = player.toSession();
+  }
+  try {
+    sessions.saveAll(data);
+  } catch (err) {
+    console.error('Could not save sessions:', err.message);
+  }
+}
+
+/** Rejoin every channel that was playing before the restart, if anyone is still listening there. */
+async function restoreSessions(client) {
+  for (const [guildId, session] of Object.entries(sessions.load())) {
+    try {
+      const voiceChannel = await client.channels.fetch(session.voiceChannelId);
+      const textChannel = await client.channels.fetch(session.textChannelId);
+      if (!voiceChannel?.isVoiceBased() || !textChannel?.isTextBased()) continue;
+      if (!voiceChannel.members.some((m) => !m.user.bot)) continue;
+      await getOrCreatePlayer(voiceChannel, textChannel).restore(session);
+      console.log(`Resumed playback in ${voiceChannel.guild.name}`);
+    } catch (err) {
+      console.error(`Could not resume in guild ${guildId}:`, err.message);
+      getPlayer(guildId)?.destroy();
+    }
+  }
+  trackingSessions = true;
+  persistSessions();
+  setInterval(persistSessions, SESSION_SAVE_INTERVAL_MS).unref();
+}
+
+/** Save sessions and stop all audio, without leaving, so the next start resumes. */
+function shutdownPlayers() {
+  persistSessions();
+  for (const player of players.values()) {
+    player.destroyed = true; // stop Idle handlers from moving on
+    player.stopStream();
+  }
+}
+
+module.exports = { LOOP_MODES, getPlayer, getOrCreatePlayer, restoreSessions, shutdownPlayers };

@@ -46,6 +46,17 @@ async function resolve(query) {
   };
 }
 
+/** Tracks from YouTube's auto-generated "Mix" for a video, starting with that video. */
+async function relatedTracks(videoId, limit = 25) {
+  const result = await youtubedl(`https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`, {
+    dumpSingleJson: true,
+    flatPlaylist: true,
+    noWarnings: true,
+    playlistEnd: limit,
+  });
+  return (result.entries ?? []).filter((e) => e.title).map(toTrack);
+}
+
 /** Search YouTube and return up to `limit` results, each with its channel name. */
 async function search(query, limit = 5) {
   const result = await youtubedl(`ytsearch${limit}:${query}`, {
@@ -96,13 +107,21 @@ function createAudioStream(url, offset = 0) {
   };
 }
 
-function thumbnailFor(url) {
+/** The video ID from a watch, shorts or youtu.be URL, or null. */
+function videoIdOf(url) {
   try {
-    const id = new URL(url).searchParams.get('v');
-    return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
+    const parsed = new URL(url);
+    if (parsed.searchParams.has('v')) return parsed.searchParams.get('v');
+    const match = parsed.pathname.match(/^\/(?:shorts\/|embed\/|live\/)?([\w-]{11})$/);
+    return match ? match[1] : null;
   } catch {
     return null;
   }
+}
+
+function thumbnailFor(url) {
+  const id = videoIdOf(url);
+  return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
 }
 
 function formatDuration(seconds) {
@@ -120,4 +139,13 @@ function parseTime(input) {
   return parts.reduce((total, p) => total * 60 + Number(p), 0);
 }
 
-module.exports = { resolve, search, createAudioStream, thumbnailFor, formatDuration, parseTime };
+module.exports = {
+  resolve,
+  relatedTracks,
+  search,
+  createAudioStream,
+  videoIdOf,
+  thumbnailFor,
+  formatDuration,
+  parseTime,
+};
