@@ -1,6 +1,7 @@
 require('dotenv').config();
-const { Client, Events, GatewayIntentBits, REST, Routes } = require('discord.js');
-const { definitions, handlers } = require('./commands');
+const { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } = require('discord.js');
+const { definitions, handleCommand, handleButton, handleSelect, handleAutocomplete } = require('./commands');
+const { getPlayer } = require('./player');
 
 const { DISCORD_TOKEN, GUILD_ID } = process.env;
 if (!DISCORD_TOKEN) {
@@ -25,18 +26,31 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand() || !interaction.inGuild()) return;
-  const handler = handlers[interaction.commandName];
+  if (!interaction.inGuild()) return;
+
+  if (interaction.isAutocomplete()) {
+    return handleAutocomplete(interaction).catch((err) => console.error('Autocomplete failed:', err));
+  }
+
+  let handler;
+  if (interaction.isChatInputCommand()) handler = handleCommand;
+  else if (interaction.isButton() && interaction.customId.startsWith('player:')) handler = handleButton;
+  else if (interaction.isStringSelectMenu() && interaction.customId.startsWith('search:')) handler = handleSelect;
   if (!handler) return;
 
   try {
     await handler(interaction);
   } catch (err) {
-    console.error(`/${interaction.commandName} failed:`, err);
-    const reply = { content: 'Something went wrong.', ephemeral: true };
-    if (interaction.deferred || interaction.replied) await interaction.editReply(reply).catch(() => {});
+    console.error(`Interaction ${interaction.commandName ?? interaction.customId} failed:`, err);
+    const reply = { content: 'Something went wrong.', flags: MessageFlags.Ephemeral };
+    if (interaction.deferred || interaction.replied) await interaction.followUp(reply).catch(() => {});
     else await interaction.reply(reply).catch(() => {});
   }
+});
+
+// Auto-leave when the bot's channel empties out (or refills).
+client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+  getPlayer(newState.guild.id)?.checkIdle();
 });
 
 client.login(DISCORD_TOKEN);

@@ -1,3 +1,5 @@
+const { spawn } = require('child_process');
+const ffmpegPath = require('ffmpeg-static');
 const youtubedl = require('youtube-dl-exec');
 
 const MAX_PLAYLIST_TRACKS = 200;
@@ -44,12 +46,25 @@ async function resolve(query) {
   };
 }
 
+/** Search YouTube and return up to `limit` results, each with its channel name. */
+async function search(query, limit = 5) {
+  const result = await youtubedl(`ytsearch${limit}:${query}`, {
+    dumpSingleJson: true,
+    flatPlaylist: true,
+    noWarnings: true,
+  });
+  return result.entries
+    .filter((e) => e.title)
+    .map((e) => ({ ...toTrack(e), channel: e.channel || e.uploader }));
+}
+
 /**
- * Spawn yt-dlp streaming the best audio of a video to stdout.
- * Returns the child process; read audio from `.stdout`.
+ * Stream a video's audio as raw 48kHz stereo PCM, starting `offset` seconds in.
+ * yt-dlp downloads (seeking server-side when offset > 0) and ffmpeg decodes.
+ * Returns { stream, kill }.
  */
-function streamAudio(url) {
-  return youtubedl.exec(
+function createAudioStream(url, offset = 0) {
+  const ytdlp = youtubedl.exec(
     url,
     {
       output: '-',
@@ -57,17 +72,52 @@ function streamAudio(url) {
       quiet: true,
       noWarnings: true,
       noPlaylist: true,
+      ...(offset > 0 ? { downloadSections: `*${offset}-inf`, ffmpegLocation: ffmpegPath } : {}),
     },
     { stdio: ['ignore', 'pipe', 'ignore'] },
   );
+  ytdlp.catch(() => {}); // exit code is irrelevant once we stop reading
+
+  const ffmpeg = spawn(
+    ffmpegPath,
+    ['-loglevel', 'error', '-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
+    { stdio: ['pipe', 'pipe', 'ignore'] },
+  );
+  ytdlp.stdout.on('error', () => {});
+  ffmpeg.stdin.on('error', () => {});
+  ytdlp.stdout.pipe(ffmpeg.stdin);
+
+  return {
+    stream: ffmpeg.stdout,
+    kill() {
+      ytdlp.kill();
+      ffmpeg.kill();
+    },
+  };
+}
+
+function thumbnailFor(url) {
+  try {
+    const id = new URL(url).searchParams.get('v');
+    return id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null;
+  } catch {
+    return null;
+  }
 }
 
 function formatDuration(seconds) {
-  if (!seconds) return 'live';
+  if (seconds == null) return 'live';
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60).toString().padStart(2, '0');
   return h ? `${h}:${m.toString().padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
-module.exports = { resolve, streamAudio, formatDuration };
+/** Parse "90", "1:30" or "1:02:03" into seconds, or null if invalid. */
+function parseTime(input) {
+  const parts = input.trim().split(':');
+  if (parts.length > 3 || parts.some((p) => !/^\d+$/.test(p))) return null;
+  return parts.reduce((total, p) => total * 60 + Number(p), 0);
+}
+
+module.exports = { resolve, search, createAudioStream, thumbnailFor, formatDuration, parseTime };
