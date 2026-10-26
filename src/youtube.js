@@ -79,28 +79,35 @@ async function search(query, limit = 5) {
 /**
  * Stream a video's audio as raw 48kHz stereo PCM, starting `offset` seconds in.
  * yt-dlp downloads (seeking server-side when offset > 0) and ffmpeg decodes.
- * Returns { stream, kill }.
+ * Returns { stream, kill, diagnostics }, where diagnostics() is the tail of both tools' stderr.
  */
 function createAudioStream(url, offset = 0) {
+  // Warnings stay on here: when a stream fails, they're usually the explanation.
   const ytdlp = youtubedl.exec(
     url,
     {
-      ...BASE_FLAGS,
       output: '-',
       format: 'bestaudio/best',
       quiet: true,
       noPlaylist: true,
       ...(offset > 0 ? { downloadSections: `*${offset}-inf`, ffmpegLocation: ffmpegPath } : {}),
     },
-    { stdio: ['ignore', 'pipe', 'ignore'] },
+    { stdio: ['ignore', 'pipe', 'pipe'] },
   );
   ytdlp.catch(() => {}); // exit code is irrelevant once we stop reading
 
   const ffmpeg = spawn(
     ffmpegPath,
     ['-loglevel', 'error', '-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
-    { stdio: ['pipe', 'pipe', 'ignore'] },
+    { stdio: ['pipe', 'pipe', 'pipe'] },
   );
+
+  const logs = { 'yt-dlp': '', ffmpeg: '' };
+  const capture = (name) => (chunk) => {
+    logs[name] = (logs[name] + chunk).slice(-2000);
+  };
+  ytdlp.stderr.on('data', capture('yt-dlp'));
+  ffmpeg.stderr.on('data', capture('ffmpeg'));
   // Let yt-dlp download ahead instead of pausing whenever ffmpeg's small pipe is full.
   const buffer = new PassThrough({ highWaterMark: DOWNLOAD_BUFFER_BYTES });
   ytdlp.stdout.on('error', () => {});
@@ -113,6 +120,12 @@ function createAudioStream(url, offset = 0) {
     kill() {
       ytdlp.kill();
       ffmpeg.kill();
+    },
+    diagnostics() {
+      return Object.entries(logs)
+        .filter(([, text]) => text.trim())
+        .map(([name, text]) => `[${name}] ${text.trim()}`)
+        .join('\n');
     },
   };
 }

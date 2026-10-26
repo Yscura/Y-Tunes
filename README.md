@@ -186,6 +186,14 @@ Names autocomplete as you type. Only the person who created a playlist, or someo
 
 ## Troubleshooting
 
+**Slow searches, or songs that stop with "⚠️ Lost the stream".** Run the diagnostic. It times each step on your machine (searching, starting a stream, download speed) and checks a Raspberry Pi's power and temperature:
+
+```sh
+npm run diagnose
+```
+
+When a stream fails, the bot also logs why (`journalctl -u ytunes -n 100` when it runs as a service).
+
 **Slash commands don't show up.** Set `GUILD_ID` in `.env` and restart. Without it, commands can take up to an hour to appear. Also check that the bot was invited with the `applications.commands` scope.
 
 **The bot joins but there's no sound.** Check that it has the **Speak** permission in that channel, and that it isn't server-muted.

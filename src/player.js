@@ -132,9 +132,14 @@ class GuildPlayer {
     const finished = this.current;
     if (finished && this.endedEarly(finished)) {
       const position = Math.floor(this.position);
+      const details = this.audio?.diagnostics();
+      console.warn(
+        `Stream for ${finished.title} stopped at ${formatDuration(position)}` +
+          (details ? `:\n${details}` : ' (no output from yt-dlp or ffmpeg)'),
+      );
       if (!this.retried) {
         this.retried = true;
-        console.warn(`Stream for ${finished.title} stopped at ${formatDuration(position)}, retrying`);
+        console.warn('Retrying from the same spot');
         this.startStream(finished.duration == null ? 0 : position);
         return;
       }
@@ -197,6 +202,13 @@ class GuildPlayer {
     this.resource = createAudioResource(this.audio.stream, { inputType: StreamType.Raw, inlineVolume: true });
     this.resource.volume.setVolumeLogarithmic(this.volume / 100);
     this.audioPlayer.play(this.resource);
+
+    // Log how long the audio took to start; slow hardware shows up here first.
+    const { resource, current } = this;
+    const startedAt = Date.now();
+    resource.playStream.once('readable', () => {
+      if (this.resource === resource) console.log(`Playing ${current.title} (audio ready after ${Date.now() - startedAt} ms)`);
+    });
   }
 
   stopStream() {
