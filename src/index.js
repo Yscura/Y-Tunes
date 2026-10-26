@@ -2,12 +2,16 @@ require('dotenv').config();
 const { Client, Events, GatewayIntentBits, MessageFlags, REST, Routes } = require('discord.js');
 const { definitions, handleCommand, handleButton, handleSelect, handleAutocomplete } = require('./commands');
 const { getPlayer, restoreSessions, shutdownPlayers } = require('./player');
+const { warmUp } = require('./youtube');
 
 const { DISCORD_TOKEN, GUILD_ID } = process.env;
 if (!DISCORD_TOKEN) {
   console.error('Missing DISCORD_TOKEN in .env');
   process.exit(1);
 }
+
+// Load yt-dlp while logging in, so the first search doesn't wait for it.
+warmUp().then((mode) => console.log(`yt-dlp: ${mode}`));
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],

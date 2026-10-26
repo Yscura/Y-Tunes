@@ -9,7 +9,14 @@ const {
   entersState,
   joinVoiceChannel,
 } = require('@discordjs/voice');
-const { createAudioStream, relatedTracks, formatDuration, thumbnailFor, videoIdOf } = require('./youtube');
+const {
+  createAudioStream,
+  prefetchStream,
+  relatedTracks,
+  formatDuration,
+  thumbnailFor,
+  videoIdOf,
+} = require('./youtube');
 const sponsorblock = require('./sponsorblock');
 const settings = require('./settings');
 const sessions = require('./sessions');
@@ -140,7 +147,7 @@ class GuildPlayer {
       if (!this.retried) {
         this.retried = true;
         console.warn('Retrying from the same spot');
-        this.startStream(finished.duration == null ? 0 : position);
+        this.startStream(finished.duration == null ? 0 : position, { fresh: true });
         return;
       }
       this.skipCurrent = true; // don't loop a track that keeps failing
@@ -195,9 +202,10 @@ class GuildPlayer {
       .catch(() => {});
   }
 
-  startStream(offset) {
+  /** `fresh` skips the cached stream lookup, e.g. when retrying after a failure. */
+  startStream(offset, { fresh = false } = {}) {
     this.stopStream();
-    this.audio = createAudioStream(this.current.url, offset);
+    this.audio = createAudioStream(this.current.url, offset, { fresh });
     this.offset = offset;
     this.resource = createAudioResource(this.audio.stream, { inputType: StreamType.Raw, inlineVolume: true });
     this.resource.volume.setVolumeLogarithmic(this.volume / 100);
@@ -233,8 +241,19 @@ class GuildPlayer {
   /** Warm caches for what plays next, so transitions don't wait on lookups. */
   prefetch() {
     const { sponsorblock: skipSegments, autoplay } = this.settings;
-    if (skipSegments && this.queue[0]) sponsorblock.getSegments(videoIdOf(this.queue[0].url));
-    if (autoplay && this.current && !this.queue.length) this.autoplayCandidates(this.current);
+    const next = this.queue[0];
+    if (next) {
+      prefetchStream(next.url);
+      if (skipSegments) sponsorblock.getSegments(videoIdOf(next.url));
+    }
+    if (autoplay && this.current && !this.queue.length) {
+      const seed = this.current;
+      this.autoplayCandidates(seed).then(async () => {
+        if (this.current !== seed || this.queue.length) return;
+        const pick = await this.nextAutoplayTrack(seed);
+        if (pick) prefetchStream(pick.url);
+      });
+    }
   }
 
   /** Call after the guild's settings change. */

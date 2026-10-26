@@ -85,22 +85,20 @@ On Linux, yt-dlp runs on Python (`python3`, which Raspberry Pi OS already has). 
 
 Install the system `ffmpeg`. The copy of ffmpeg that comes with the bot can't download anything on Linux, so without the system one, jumping ahead in a song (`/seek`, skipping intros, resuming after a restart) has to download from the start, which is slow for long videos.
 
-### 1b. Faster yt-dlp (recommended on a Pi)
+A Pi 3 needs about 5 seconds just to start yt-dlp. On Linux the bot avoids that: it loads yt-dlp into a small Python helper once at startup and reuses it for every search and song. It also looks up the next song in the queue while the current one plays, so skips start almost instantly. All of this is automatic; `npm run diagnose` shows whether it's active (`lookups: server …`).
 
-The yt-dlp that comes with the bot is a single-file Python app. A Pi 3 needs about 5 seconds just to start it, and the bot starts it for every search and every song. A normal install starts faster:
+### 1b. Your own yt-dlp (optional)
+
+To update yt-dlp without reinstalling the bot, install it separately and point the bot at it in `.env`:
 
 ```sh
 sudo apt install -y pipx
-pipx install yt-dlp
+pipx install yt-dlp        # update later with: pipx upgrade yt-dlp
 ```
-
-Then, in step 2, add its path to `.env`:
 
 ```ini
 YTDLP_PATH=/home/<your user>/.local/bin/yt-dlp
 ```
-
-Run `npm run diagnose` before and after to compare the startup time. Update it now and then with `pipx upgrade yt-dlp`, because YouTube changes often.
 
 ### 2. Get the bot and configure it
 
@@ -233,6 +231,8 @@ src/
   commands.js      Slash command definitions and handlers
   player.js        Per-server playback: queue, controls, autoplay, SponsorBlock, resume
   youtube.js       Search, playlists and audio streaming via yt-dlp + ffmpeg
+  ytdlp.js         Runs yt-dlp lookups, keeping it loaded via ytdlp_server.py when possible
+  ytdlp_server.py  Python helper that keeps yt-dlp loaded between lookups (Linux/macOS)
   sponsorblock.js  SponsorBlock segment lookups
   playlists.js     Saved playlists
   settings.js      Per-server settings
@@ -240,5 +240,6 @@ src/
   store.js         Small JSON-file storage helper
 scripts/
   install-service.sh  Installs the systemd service (Linux / Raspberry Pi)
+  diagnose.js         Times each step on this machine (npm run diagnose)
 data/              Created at runtime (git-ignored)
 ```
