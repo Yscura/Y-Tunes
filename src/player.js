@@ -506,6 +506,11 @@ function getPlayer(guildId) {
   return players.get(guildId);
 }
 
+/** How many guilds are currently playing something. */
+function activePlayerCount() {
+  return [...players.values()].filter((player) => player.current).length;
+}
+
 function getOrCreatePlayer(voiceChannel, textChannel) {
   let player = players.get(voiceChannel.guild.id);
   if (!player) {
@@ -565,4 +570,4 @@ function shutdownPlayers() {
   }
 }
 
-module.exports = { LOOP_MODES, getPlayer, getOrCreatePlayer, restoreSessions, shutdownPlayers };
+module.exports = { LOOP_MODES, getPlayer, getOrCreatePlayer, activePlayerCount, restoreSessions, shutdownPlayers };

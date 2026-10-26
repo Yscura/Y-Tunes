@@ -61,7 +61,7 @@ You should see:
 
 ```
 Logged in as YourBot#1234
-Registered 20 slash commands in guild 123456789012345678
+Registered 21 slash commands in guild 123456789012345678
 ```
 
 Join a voice channel and type `/play never gonna give you up`.
@@ -186,6 +186,7 @@ Names autocomplete as you type. Only the person who created a playlist, or someo
 | `/sponsorblock <True/False>` | Skip non-music sections, sponsors and subscribe reminders. On by default. |
 | `/dj set <role>` / `/dj clear` | Limit playback controls to a DJ role (see below). Needs Manage Server. |
 | `/settings` | Show this server's settings. |
+| `/stats` | Show how the machine running the bot is doing: CPU, temperature, memory, disk, Wi-Fi, power and uptime. |
 
 ## Who can do what
 
@@ -242,6 +243,7 @@ src/
   settings.js      Per-server settings
   sessions.js      Saved playback state (resume after restart, queues kept by /stop)
   store.js         Small JSON-file storage helper
+  system.js        Machine stats for /stats (CPU, temperature, memory, …)
 scripts/
   install-service.sh  Installs the systemd service (Linux / Raspberry Pi)
   diagnose.js         Times each step on this machine (npm run diagnose)

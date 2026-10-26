@@ -1,15 +1,17 @@
 const {
   ActionRowBuilder,
+  EmbedBuilder,
   MessageFlags,
   PermissionFlagsBits,
   SlashCommandBuilder,
   StringSelectMenuBuilder,
 } = require('discord.js');
-const { resolve, search, formatDuration, parseTime } = require('./youtube');
-const { LOOP_MODES, getPlayer, getOrCreatePlayer } = require('./player');
+const { resolve, search, formatDuration, parseTime, warmUp } = require('./youtube');
+const { LOOP_MODES, getPlayer, getOrCreatePlayer, activePlayerCount } = require('./player');
 const playlists = require('./playlists');
 const settings = require('./settings');
 const sessions = require('./sessions');
+const { getSystemStats } = require('./system');
 
 const QUEUE_PAGE_SIZE = 10;
 
@@ -104,6 +106,9 @@ const definitions = [
     )
     .addSubcommand((sub) => sub.setName('clear').setDescription('Let everyone control playback again')),
   new SlashCommandBuilder().setName('settings').setDescription("Show this server's music settings"),
+  new SlashCommandBuilder()
+    .setName('stats')
+    .setDescription('Show how the machine running the bot is doing: CPU, temperature, memory and more'),
 ].map((cmd) => cmd.toJSON());
 
 function replyPrivately(interaction, content) {
@@ -492,7 +497,96 @@ const commandHandlers = {
       ].join('\n'),
     );
   },
+
+  async stats(interaction) {
+    await interaction.deferReply();
+    const [stats, lookups] = await Promise.all([getSystemStats(), warmUp()]);
+    return interaction.editReply({ embeds: [statsEmbed(stats, lookups, interaction.client)] });
+  },
 };
+
+const formatBytes = (bytes) =>
+  bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.round(bytes / 1e6)} MB`;
+const percentOf = ({ used, total }) => Math.round((100 * used) / total);
+
+function formatUptime(seconds) {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return [d && `${d}d`, (d || h) && `${h}h`, `${m}m`].filter(Boolean).join(' ');
+}
+
+/** Colour the embed by the worst problem: red for overheating/power trouble, yellow for strain. */
+function statsEmbed(stats, lookups, client) {
+  const { cpu, temperature, memory, throttled } = stats;
+  const problems = { bad: false, warn: false };
+
+  let tempText = 'not available';
+  if (temperature !== null) {
+    const icon = temperature >= 80 ? '🔥' : temperature >= 70 ? '⚠️' : '✅';
+    tempText = `${icon} ${temperature.toFixed(1)} °C`;
+    if (temperature >= 80) problems.bad = true;
+    else if (temperature >= 70) problems.warn = true;
+  }
+  if (cpu >= 90 || percentOf(memory) >= 90) problems.warn = true;
+
+  const cpuLines = [`${Math.round(cpu)}% of ${stats.cores} cores`];
+  if (stats.load) cpuLines.push(`load ${stats.load.map((l) => l.toFixed(2)).join(' / ')}`);
+  if (stats.clockMhz) cpuLines.push(`${Math.round(stats.clockMhz)} MHz`);
+
+  const fields = [
+    { name: '🧠 CPU', value: cpuLines.join('\n'), inline: true },
+    { name: '🌡️ Temperature', value: tempText, inline: true },
+    {
+      name: '💾 Memory',
+      value: `${formatBytes(memory.used)} / ${formatBytes(memory.total)} (${percentOf(memory)}%)`,
+      inline: true,
+    },
+  ];
+  if (stats.disk) {
+    fields.push({
+      name: '🗄️ Disk',
+      value: `${formatBytes(stats.disk.used)} / ${formatBytes(stats.disk.total)} (${percentOf(stats.disk)}%)`,
+      inline: true,
+    });
+  }
+  if (stats.wifi) fields.push({ name: '📶 Wi-Fi', value: `${stats.wifi.percent}% (${stats.wifi.iface})`, inline: true });
+  if (throttled) {
+    let value = '✅ OK';
+    if (throttled.now.length) {
+      value = `🔥 ${throttled.now.join(', ')} right now`;
+      problems.bad = true;
+    } else if (throttled.since.length) {
+      value = `⚠️ ${throttled.since.join(', ')} since boot`;
+      problems.warn = true;
+    }
+    fields.push({ name: '⚡ Power & throttling', value, inline: true });
+  }
+  fields.push(
+    {
+      name: '⏱️ Uptime',
+      value: `system ${formatUptime(stats.systemUptime)}\nbot ${formatUptime(stats.botUptime)}`,
+      inline: true,
+    },
+    {
+      name: '🤖 Bot',
+      value: [
+        `${formatBytes(stats.botMemory)} memory`,
+        `ping ${client.ws.ping >= 0 ? `${client.ws.ping} ms` : 'measuring…'}`,
+        `playing in ${activePlayerCount()} of ${client.guilds.cache.size} servers`,
+        `yt-dlp: ${lookups.startsWith('server') ? 'kept loaded' : 'started per lookup'}`,
+      ].join('\n'),
+      inline: true,
+    },
+  );
+
+  return new EmbedBuilder()
+    .setColor(problems.bad ? 0xed4245 : problems.warn ? 0xfee75c : 0x57f287)
+    .setTitle('📊 System stats')
+    .addFields(fields)
+    .setFooter({ text: stats.model })
+    .setTimestamp();
+}
 
 function toggleSetting(interaction, key, label) {
   if (!isDJ(interaction)) return replyNotDJ(interaction);
