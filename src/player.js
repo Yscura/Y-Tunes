@@ -19,6 +19,11 @@ const SESSION_SAVE_INTERVAL_MS = 5_000;
 const LOOP_MODES = ['off', 'song', 'queue'];
 const HISTORY_SIZE = 100;
 const MAX_AUTOPLAY_SECONDS = 10 * 60; // prefer songs over hour-long mixes
+// How long the stream may stall before giving up on it. @discordjs/voice defaults to 5 frames
+// (100 ms), which turns any network hiccup into "song over" and skips through the queue.
+const MAX_STALL_FRAMES = 50 * 10; // 10 s of 20 ms frames
+// A track that stops further than this from its end (and wasn't skipped) failed mid-stream.
+const EARLY_END_SECONDS = 10;
 
 /** One player (connection + queue) per guild. */
 const players = new Map();
@@ -50,6 +55,8 @@ class GuildPlayer {
     this.loop = 'off';
     this.volume = 100;
     this.skipCurrent = false; // true when the current track must not be repeated by loop
+    this.endedBySegment = false; // true when SponsorBlock cut off the rest of the track
+    this.retried = false; // whether the current track already got its one retry after failing
     this.segments = []; // SponsorBlock segments of the current track
     this.history = []; // recently played video IDs, so autoplay doesn't repeat them
     this.autoplayPrefetch = null; // { seedId, promise } of related tracks
@@ -66,18 +73,15 @@ class GuildPlayer {
     });
 
     this.audioPlayer = createAudioPlayer({
-      behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
+      behaviors: { noSubscriber: NoSubscriberBehavior.Pause, maxMissedFrames: MAX_STALL_FRAMES },
     });
     this.connection.subscribe(this.audioPlayer);
 
     this.audioPlayer.on(AudioPlayerStatus.Idle, () => {
       this.onTrackEnd().catch((err) => console.error('Failed to start next track:', err));
     });
-    this.audioPlayer.on('error', (err) => {
-      console.error('Audio player error:', err.message);
-      this.skipCurrent = true;
-      this.textChannel.send(`⚠️ Error playing **${this.current?.title}**, skipping.`).catch(() => {});
-    });
+    // Followed by Idle, where onTrackEnd retries or skips the track.
+    this.audioPlayer.on('error', (err) => console.error(`Audio error on ${this.current?.title}:`, err.message));
 
     // Recover from brief disconnects (e.g. being moved); otherwise clean up.
     this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
@@ -126,6 +130,19 @@ class GuildPlayer {
   async onTrackEnd() {
     if (this.destroyed) return;
     const finished = this.current;
+    if (finished && this.endedEarly(finished)) {
+      const position = Math.floor(this.position);
+      if (!this.retried) {
+        this.retried = true;
+        console.warn(`Stream for ${finished.title} stopped at ${formatDuration(position)}, retrying`);
+        this.startStream(finished.duration == null ? 0 : position);
+        return;
+      }
+      this.skipCurrent = true; // don't loop a track that keeps failing
+      this.textChannel
+        .send(`⚠️ Lost the stream for **${finished.title}** at ${formatDuration(position)}, skipping.`)
+        .catch(() => {});
+    }
     if (finished) {
       if (this.loop === 'song' && !this.skipCurrent) this.queue.unshift(finished);
       else if (this.loop === 'queue') this.queue.push(finished);
@@ -145,6 +162,8 @@ class GuildPlayer {
     const track = this.queue.shift();
     this.current = track ?? null;
     this.skipCurrent = false;
+    this.endedBySegment = false;
+    this.retried = false;
     this.segments = [];
     this.checkIdle();
 
@@ -184,6 +203,13 @@ class GuildPlayer {
     this.audio?.kill();
     this.audio = null;
     this.resource = null;
+  }
+
+  /** Whether the track stopped on its own well before its end, i.e. the stream failed. */
+  endedEarly(track) {
+    if (this.skipCurrent || this.endedBySegment) return false;
+    if (track.duration == null) return true; // live streams don't end by themselves
+    return this.position < track.duration - EARLY_END_SECONDS;
   }
 
   remember(videoId) {
@@ -233,8 +259,12 @@ class GuildPlayer {
     const segment = this.segments.find((s) => position >= s.start && position < s.end - 1);
     if (!segment) return;
     // A segment running to the end means the song is over; treat it like a natural end (loops still apply).
-    if (this.endsTrack(segment, this.current)) this.audioPlayer.stop(true);
-    else this.seek(segment.end);
+    if (this.endsTrack(segment, this.current)) {
+      this.endedBySegment = true;
+      this.audioPlayer.stop(true);
+    } else {
+      this.seek(segment.end);
+    }
   }
 
   // --- Autoplay ---

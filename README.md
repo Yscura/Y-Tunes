@@ -68,6 +68,57 @@ Join a voice channel and type `/play never gonna give you up`.
 
 Stop the bot with **Ctrl+C**. It saves what was playing, so the next `npm start` picks up where it left off.
 
+## Running on a Raspberry Pi (or any Linux server)
+
+To keep the bot running all the time, install it as a systemd service. It then starts on boot, restarts if it crashes, and keeps retrying until the network is up. After a power cut it comes back on its own and resumes the music, as long as someone is still in the voice channel.
+
+**Hardware:** a Raspberry Pi 3, 4 or 5 running the **64-bit** Raspberry Pi OS is recommended. Some of the audio components don't ship ready-made builds for 32-bit systems or the Pi Zero.
+
+### 1. Install Node.js and the build tools
+
+```sh
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs git python3 build-essential
+```
+
+On Linux, yt-dlp runs on Python (`python3`, which Raspberry Pi OS already has). `build-essential` is only used if `@discordjs/opus` has to be compiled.
+
+### 2. Get the bot and configure it
+
+```sh
+git clone <this repo> ~/YTunes
+cd ~/YTunes
+npm install
+cp .env.example .env
+nano .env        # add DISCORD_TOKEN and GUILD_ID
+```
+
+Check that it works with `npm start`, then stop it with Ctrl+C.
+
+### 3. Install the service
+
+```sh
+sudo bash scripts/install-service.sh
+```
+
+The script runs the bot as your user, from this folder, with the Node.js it finds (nvm installs are supported). It also starts the bot right away.
+
+| Task | Command |
+|---|---|
+| Live logs | `journalctl -u ytunes -f` |
+| Status | `systemctl status ytunes` |
+| Restart | `sudo systemctl restart ytunes` |
+| Stop until next boot | `sudo systemctl stop ytunes` |
+| Remove the service | `sudo bash scripts/install-service.sh --uninstall` |
+
+To update the bot:
+
+```sh
+cd ~/YTunes && git pull && npm install && sudo systemctl restart ytunes
+```
+
+If you move the folder, run the install script again.
+
 ## Commands
 
 ### Playing music
@@ -131,6 +182,7 @@ Names autocomplete as you type. Only the person who created a playlist, or someo
 - **Resume after restart:** the bot saves the queue every few seconds. After a restart it rejoins and continues, but only if someone is still in the channel.
 - **Stored data:** saved playlists, settings, the resume state and queues saved by `/stop` are kept as JSON files in `data/`. Back that folder up if you care about the playlists. It's excluded from git.
 - **Video:** Discord doesn't let bots stream video, so YTunes plays audio only.
+- **Network hiccups:** the bot downloads ahead and waits up to 10 seconds through a stall. If a stream drops completely, it retries once from the same spot. Only then does it skip the song, and it posts "⚠️ Lost the stream for …" when it does.
 
 ## Troubleshooting
 
@@ -159,5 +211,7 @@ src/
   settings.js      Per-server settings
   sessions.js      Saved playback state (resume after restart, queues kept by /stop)
   store.js         Small JSON-file storage helper
+scripts/
+  install-service.sh  Installs the systemd service (Linux / Raspberry Pi)
 data/              Created at runtime (git-ignored)
 ```

@@ -1,8 +1,15 @@
 const { spawn } = require('child_process');
+const { PassThrough } = require('stream');
 const ffmpegPath = require('ffmpeg-static');
 const youtubedl = require('youtube-dl-exec');
 
 const MAX_PLAYLIST_TRACKS = 200;
+// Compressed audio is ~16 KB/s, so this holds minutes of it to ride out network hiccups.
+const DOWNLOAD_BUFFER_BYTES = 8 * 1024 * 1024;
+
+// yt-dlp warns that it has no JavaScript runtime for YouTube. Audio still works without one,
+// and pointing it at Node made every stream take 8-10 s to start instead of ~2 s.
+const BASE_FLAGS = { noWarnings: true };
 
 function toTrack(entry) {
   return {
@@ -22,9 +29,9 @@ async function resolve(query) {
   const isPlaylist = Boolean(url?.searchParams.has('list'));
 
   const result = await youtubedl(url ? query : `ytsearch1:${query}`, {
+    ...BASE_FLAGS,
     dumpSingleJson: true,
     flatPlaylist: true,
-    noWarnings: true,
     ...(isPlaylist ? {} : { noPlaylist: true }),
   });
 
@@ -49,9 +56,9 @@ async function resolve(query) {
 /** Tracks from YouTube's auto-generated "Mix" for a video, starting with that video. */
 async function relatedTracks(videoId, limit = 25) {
   const result = await youtubedl(`https://www.youtube.com/watch?v=${videoId}&list=RD${videoId}`, {
+    ...BASE_FLAGS,
     dumpSingleJson: true,
     flatPlaylist: true,
-    noWarnings: true,
     playlistEnd: limit,
   });
   return (result.entries ?? []).filter((e) => e.title).map(toTrack);
@@ -60,9 +67,9 @@ async function relatedTracks(videoId, limit = 25) {
 /** Search YouTube and return up to `limit` results, each with its channel name. */
 async function search(query, limit = 5) {
   const result = await youtubedl(`ytsearch${limit}:${query}`, {
+    ...BASE_FLAGS,
     dumpSingleJson: true,
     flatPlaylist: true,
-    noWarnings: true,
   });
   return result.entries
     .filter((e) => e.title)
@@ -78,10 +85,10 @@ function createAudioStream(url, offset = 0) {
   const ytdlp = youtubedl.exec(
     url,
     {
+      ...BASE_FLAGS,
       output: '-',
       format: 'bestaudio/best',
       quiet: true,
-      noWarnings: true,
       noPlaylist: true,
       ...(offset > 0 ? { downloadSections: `*${offset}-inf`, ffmpegLocation: ffmpegPath } : {}),
     },
@@ -94,9 +101,12 @@ function createAudioStream(url, offset = 0) {
     ['-loglevel', 'error', '-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
     { stdio: ['pipe', 'pipe', 'ignore'] },
   );
+  // Let yt-dlp download ahead instead of pausing whenever ffmpeg's small pipe is full.
+  const buffer = new PassThrough({ highWaterMark: DOWNLOAD_BUFFER_BYTES });
   ytdlp.stdout.on('error', () => {});
+  buffer.on('error', () => {});
   ffmpeg.stdin.on('error', () => {});
-  ytdlp.stdout.pipe(ffmpeg.stdin);
+  ytdlp.stdout.pipe(buffer).pipe(ffmpeg.stdin);
 
   return {
     stream: ffmpeg.stdout,
