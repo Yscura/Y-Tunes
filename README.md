@@ -201,6 +201,10 @@ Names autocomplete as you type. Only the person who created a playlist, or someo
 - **Video:** Discord doesn't let bots stream video, so YTunes plays audio only.
 - **Network hiccups:** the bot downloads ahead and waits up to 10 seconds through a stall. If a stream drops completely, it retries once from the same spot. Only then does it skip the song, and it posts "⚠️ Lost the stream for …" when it does.
 
+## Upkeep
+For upkeep: if songs start failing one day, it's usually because YouTube changed something. 
+On the Pi, npm install youtube-dl-exec@latest, or pipx upgrade yt-dlp if you use pipx, followed by sudo systemctl restart ytunes, usually fixes it.
+
 ## Troubleshooting
 
 **Slow searches, or songs that stop with "⚠️ Lost the stream".** Run the diagnostic. It times each step on your machine (searching, starting a stream, download speed) and checks a Raspberry Pi's power and temperature:
