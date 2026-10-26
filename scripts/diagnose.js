@@ -3,8 +3,7 @@
 const { execFile } = require('child_process');
 const os = require('os');
 const { generateDependencyReport } = require('@discordjs/voice');
-const { constants: ytdlpConstants } = require('youtube-dl-exec');
-const { resolve, createAudioStream } = require('../src/youtube');
+const { YTDLP_PATH, FFMPEG_PATH, FFMPEG_CAN_DOWNLOAD, resolve, createAudioStream } = require('../src/youtube');
 
 const PCM_BYTES_PER_SECOND = 48000 * 2 * 2; // 48 kHz, stereo, 16-bit
 const STREAM_TEST_SECONDS = 20;
@@ -91,12 +90,23 @@ function reportStream(label, result, durationLeft) {
   console.log(generateDependencyReport());
 
   section('yt-dlp');
-  const ytdlpPath = ytdlpConstants.YOUTUBE_DL_PATH;
-  const version = await run(ytdlpPath, ['--version']);
-  console.log(`${ytdlpPath}`);
+  const version = await run(YTDLP_PATH, ['--version']);
+  console.log(`${YTDLP_PATH}${process.env.YTDLP_PATH ? ' (from YTDLP_PATH)' : ' (bundled)'}`);
   console.log(`version ${version.out || '(failed)'}, startup took ${(version.ms / 1000).toFixed(1)} s`);
   if (version.err) warn(`yt-dlp doesn't run: ${version.err.message}`);
-  else if (version.ms > 2000) warn(`yt-dlp takes ${(version.ms / 1000).toFixed(1)} s just to start, and the bot starts it for every search and song.`);
+  else if (version.ms > 2000) {
+    warn(
+      `yt-dlp takes ${(version.ms / 1000).toFixed(1)} s just to start, and the bot starts it for every search and song.` +
+        (process.env.YTDLP_PATH ? '' : ' Install it with pipx and set YTDLP_PATH (see the README).'),
+    );
+  }
+
+  section('ffmpeg');
+  console.log(`${FFMPEG_PATH}${FFMPEG_PATH.includes('ffmpeg-static') ? ' (bundled)' : ' (system)'}`);
+  console.log(`seeking: ${FFMPEG_CAN_DOWNLOAD ? 'downloads from the offset (fast)' : 'downloads from the start and skips ahead'}`);
+  if (!FFMPEG_CAN_DOWNLOAD) {
+    warn("Using the bundled ffmpeg, which can't download on Linux, so long seeks are slow. Run: sudo apt install ffmpeg");
+  }
   if (process.platform !== 'win32') {
     const python = await run('python3', ['--version']);
     console.log(`python3: ${python.err ? 'not found' : python.out}`);

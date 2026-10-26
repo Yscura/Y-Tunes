@@ -82,6 +82,6 @@ echo "  user:   $RUN_USER"
 echo "  folder: $APP_DIR"
 echo "  node:   $NODE_BIN ($("$NODE_BIN" --version))"
 echo
-echo "Logs:    journalctl -u $SERVICE -f"
+echo "Logs:    sudo journalctl -u $SERVICE -f"
 echo "Status:  systemctl status $SERVICE"
 echo "Restart: sudo systemctl restart $SERVICE"

@@ -78,10 +78,29 @@ To keep the bot running all the time, install it as a systemd service. It then s
 
 ```sh
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt install -y nodejs git python3 build-essential
+sudo apt install -y nodejs git python3 ffmpeg build-essential
 ```
 
 On Linux, yt-dlp runs on Python (`python3`, which Raspberry Pi OS already has). `build-essential` is only used if `@discordjs/opus` has to be compiled.
+
+Install the system `ffmpeg`. The copy of ffmpeg that comes with the bot can't download anything on Linux, so without the system one, jumping ahead in a song (`/seek`, skipping intros, resuming after a restart) has to download from the start, which is slow for long videos.
+
+### 1b. Faster yt-dlp (recommended on a Pi)
+
+The yt-dlp that comes with the bot is a single-file Python app. A Pi 3 needs about 5 seconds just to start it, and the bot starts it for every search and every song. A normal install starts faster:
+
+```sh
+sudo apt install -y pipx
+pipx install yt-dlp
+```
+
+Then, in step 2, add its path to `.env`:
+
+```ini
+YTDLP_PATH=/home/<your user>/.local/bin/yt-dlp
+```
+
+Run `npm run diagnose` before and after to compare the startup time. Update it now and then with `pipx upgrade yt-dlp`, because YouTube changes often.
 
 ### 2. Get the bot and configure it
 
@@ -105,7 +124,7 @@ The script runs the bot as your user, from this folder, with the Node.js it find
 
 | Task | Command |
 |---|---|
-| Live logs | `journalctl -u ytunes -f` |
+| Live logs | `sudo journalctl -u ytunes -f` |
 | Status | `systemctl status ytunes` |
 | Restart | `sudo systemctl restart ytunes` |
 | Stop until next boot | `sudo systemctl stop ytunes` |
@@ -192,7 +211,7 @@ Names autocomplete as you type. Only the person who created a playlist, or someo
 npm run diagnose
 ```
 
-When a stream fails, the bot also logs why (`journalctl -u ytunes -n 100` when it runs as a service).
+When a stream fails, the bot also logs why. If it runs as a service, see `sudo journalctl -u ytunes -n 100`. Without `sudo`, journalctl may show "No entries" even when there are logs.
 
 **Slash commands don't show up.** Set `GUILD_ID` in `.env` and restart. Without it, commands can take up to an hour to appear. Also check that the bot was invited with the `applications.commands` scope.
 

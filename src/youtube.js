@@ -1,7 +1,29 @@
-const { spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const { PassThrough } = require('stream');
-const ffmpegPath = require('ffmpeg-static');
-const youtubedl = require('youtube-dl-exec');
+const { create: createYoutubeDl, constants: ytdlpConstants } = require('youtube-dl-exec');
+
+/** Full path of a program on PATH (Linux/macOS), or null. */
+function findOnPath(name) {
+  if (process.platform === 'win32') return null;
+  try {
+    return execFileSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// The bundled binaries work everywhere, but on Linux normal installs are better:
+// - yt-dlp installed with pip/pipx starts much faster than the bundled single-file version
+//   (seconds per search and per song on a Raspberry Pi), so YTDLP_PATH can point at one.
+// - ffmpeg-static's Linux build can't resolve hostnames, so it can't download for yt-dlp.
+const YTDLP_PATH = process.env.YTDLP_PATH || ytdlpConstants.YOUTUBE_DL_PATH;
+const systemFfmpeg = process.env.FFMPEG_PATH || findOnPath('ffmpeg');
+const FFMPEG_PATH = systemFfmpeg || require('ffmpeg-static');
+// Seeking normally has yt-dlp's ffmpeg download from the offset; without a capable ffmpeg we
+// download from the start and have our ffmpeg skip ahead, which is slower for long seeks.
+const FFMPEG_CAN_DOWNLOAD = process.platform !== 'linux' || Boolean(systemFfmpeg);
+
+const youtubedl = createYoutubeDl(YTDLP_PATH);
 
 const MAX_PLAYLIST_TRACKS = 200;
 // Compressed audio is ~16 KB/s, so this holds minutes of it to ride out network hiccups.
@@ -82,6 +104,7 @@ async function search(query, limit = 5) {
  * Returns { stream, kill, diagnostics }, where diagnostics() is the tail of both tools' stderr.
  */
 function createAudioStream(url, offset = 0) {
+  const seekRemotely = offset > 0 && FFMPEG_CAN_DOWNLOAD;
   // Warnings stay on here: when a stream fails, they're usually the explanation.
   const ytdlp = youtubedl.exec(
     url,
@@ -90,15 +113,16 @@ function createAudioStream(url, offset = 0) {
       format: 'bestaudio/best',
       quiet: true,
       noPlaylist: true,
-      ...(offset > 0 ? { downloadSections: `*${offset}-inf`, ffmpegLocation: ffmpegPath } : {}),
+      ...(seekRemotely ? { downloadSections: `*${offset}-inf`, ffmpegLocation: FFMPEG_PATH } : {}),
     },
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
   ytdlp.catch(() => {}); // exit code is irrelevant once we stop reading
 
+  const skipAhead = offset > 0 && !seekRemotely ? ['-ss', String(offset)] : [];
   const ffmpeg = spawn(
-    ffmpegPath,
-    ['-loglevel', 'error', '-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
+    FFMPEG_PATH,
+    ['-loglevel', 'error', ...skipAhead, '-i', 'pipe:0', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
     { stdio: ['pipe', 'pipe', 'pipe'] },
   );
 
@@ -163,6 +187,9 @@ function parseTime(input) {
 }
 
 module.exports = {
+  YTDLP_PATH,
+  FFMPEG_PATH,
+  FFMPEG_CAN_DOWNLOAD,
   resolve,
   relatedTracks,
   search,
