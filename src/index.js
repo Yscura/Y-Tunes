@@ -4,7 +4,7 @@ const { definitions, handleCommand, handleButton, handleSelect, handleAutocomple
 const { getPlayer, restoreSessions, shutdownPlayers } = require('./player');
 const { warmUp } = require('./youtube');
 
-const { DISCORD_TOKEN, GUILD_ID } = process.env;
+const { DISCORD_TOKEN } = process.env;
 if (!DISCORD_TOKEN) {
   console.error('Missing DISCORD_TOKEN in .env');
   process.exit(1);
@@ -17,19 +17,31 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
 });
 
-client.once(Events.ClientReady, async (c) => {
-  console.log(`Logged in as ${c.user.tag}`);
+const rest = new REST().setToken(DISCORD_TOKEN);
 
-  // Guild commands update instantly; global ones can take up to an hour.
-  const rest = new REST().setToken(DISCORD_TOKEN);
-  const route = GUILD_ID
-    ? Routes.applicationGuildCommands(c.user.id, GUILD_ID)
-    : Routes.applicationCommands(c.user.id);
-  await rest.put(route, { body: definitions });
-  console.log(`Registered ${definitions.length} slash commands ${GUILD_ID ? `in guild ${GUILD_ID}` : 'globally'}`);
+// Commands are registered per server rather than globally: per-server commands show up
+// instantly, while global ones can take up to an hour to appear.
+async function registerCommands(guild) {
+  try {
+    await rest.put(Routes.applicationGuildCommands(client.user.id, guild.id), { body: definitions });
+    console.log(`Registered ${definitions.length} slash commands in ${guild.name}`);
+  } catch (err) {
+    console.error(`Could not register commands in ${guild.name}:`, err.message);
+  }
+}
+
+client.once(Events.ClientReady, async (c) => {
+  console.log(`Logged in as ${c.user.tag}, in ${c.guilds.cache.size} server(s)`);
+
+  // Remove global commands left over from older versions, so they don't show up twice.
+  await rest.put(Routes.applicationCommands(c.user.id), { body: [] }).catch(() => {});
+  for (const guild of c.guilds.cache.values()) await registerCommands(guild);
 
   await restoreSessions(c);
 });
+
+// Added to a new server: make the commands available there right away.
+client.on(Events.GuildCreate, (guild) => registerCommands(guild));
 
 // Save what's playing on shutdown so the next start resumes it.
 function shutdown() {

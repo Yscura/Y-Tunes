@@ -28,7 +28,7 @@ You don't need to install anything else. yt-dlp and ffmpeg are downloaded automa
 3. Open **OAuth2 → URL Generator** and tick:
    - **Scopes:** `bot` and `applications.commands`
    - **Bot permissions:** View Channels, Send Messages, Embed Links, Connect and Speak
-4. Open the generated URL and add the bot to your server.
+4. Open the generated URL and add the bot to your server. To use it in more servers, open the same URL again and pick another server. One bot (and one token) can be in any number of servers, and each server gets its own queue, settings and playlists.
 
 No privileged intents are needed. You can leave all three switches on the Bot tab off.
 
@@ -44,12 +44,9 @@ Copy `.env.example` to `.env` and fill it in:
 
 ```ini
 DISCORD_TOKEN=your-bot-token
-GUILD_ID=your-server-id
 ```
 
-`GUILD_ID` is optional, but recommended. With it, slash commands show up in that server right away. Without it, they're registered for every server the bot is in, which can take up to an hour.
-
-To find your server ID, enable **Developer Mode** (User Settings → Advanced), then right-click your server and choose **Copy Server ID**.
+The bot registers its slash commands in every server it's in when it starts, and in new servers as soon as it's added, so they show up right away.
 
 ### 4. Run
 
@@ -60,8 +57,8 @@ npm start
 You should see:
 
 ```
-Logged in as YourBot#1234
-Registered 21 slash commands in guild 123456789012345678
+Logged in as YourBot#1234, in 1 server(s)
+Registered 21 slash commands in Your Server
 ```
 
 Join a voice channel and type `/play never gonna give you up`.
@@ -107,7 +104,7 @@ git clone <this repo> ~/YTunes
 cd ~/YTunes
 npm install
 cp .env.example .env
-nano .env        # add DISCORD_TOKEN and GUILD_ID
+nano .env        # add DISCORD_TOKEN
 ```
 
 Check that it works with `npm start`, then stop it with Ctrl+C.
@@ -216,7 +213,7 @@ npm run diagnose
 
 When a stream fails, the bot also logs why. If it runs as a service, see `sudo journalctl -u ytunes -n 100`. Without `sudo`, journalctl may show "No entries" even when there are logs.
 
-**Slash commands don't show up.** Set `GUILD_ID` in `.env` and restart. Without it, commands can take up to an hour to appear. Also check that the bot was invited with the `applications.commands` scope.
+**Slash commands don't show up.** Check the log for "Registered … slash commands in <your server>". If it says "Could not register commands", invite the bot again with the `applications.commands` scope. You may also need to restart Discord (Ctrl+R) for new commands to appear.
 
 **The bot joins but there's no sound.** Check that it has the **Speak** permission in that channel, and that it isn't server-muted.
 
